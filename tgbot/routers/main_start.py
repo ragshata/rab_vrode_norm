@@ -8,7 +8,7 @@ from aiogram.fsm.state import State, StatesGroup
 from tgbot.database.db_users import Clientx, Userx
 from tgbot.database.db_settings import Settingsx
 from tgbot.database.db_users import UserModel
-from tgbot.keyboards.inline_register import cities_kb, skip_kb, specs_kb
+from tgbot.keyboards.inline_register import SPECS, cities_kb, skip_kb, specs_kb
 from tgbot.keyboards.inline_user import user_support_finl
 from tgbot.keyboards.reply_main import (
     menu_frep,
@@ -261,50 +261,47 @@ async def specs_done(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# Приём фото (1..5)
-@router.message(RegisterStates.photos, F.photo)
-async def receive_photo(message: Message, state: FSMContext):
+from aiogram import types, F, Router
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.filters import StateFilter
+
+import json
+
+
+
+# --- Клавиатура «Готово / Пропустить» для фото работ ---
+def reg_photos_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готово", callback_data="reg:photos_done")],
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="reg:photos_skip")],
+    ])
+
+
+# --- Общая финализация регистрации исполнителя ---
+async def _finalize_worker_registration(user_id: int, state: FSMContext, recipient: types.Message | types.CallbackQuery):
     data = await state.get_data()
-    files = data.get("work_photos", [])
-    if not isinstance(files, list):
-        files = []
-    if len(files) >= 5:
-        await message.answer(
-            "Максимум 5 фото. Нажмите «Пропустить» или завершите отправку."
-        )
-        return
-    file_id = message.photo[-1].file_id
-    files.append(file_id)
-    await state.update_data(work_photos=files)
-    await message.answer(
-        f"Фото добавлено ({len(files)}/5). Можете отправить ещё или нажмите «Пропустить».",
-        reply_markup=types.ReplyKeyboardRemove(),
-    )
 
+    user_rlname = data.get("user_rlname", "")
+    user_surname = data.get("user_surname", "")
+    user_number = data.get("user_number", "")
+    experience_years = int(data.get("experience_years", 0) or 0)
+    city = data.get("city", "")
 
-@router.callback_query(RegisterStates.photos, F.data == "photos_skip")
-async def photos_skip(call: CallbackQuery, state: FSMContext):
-    # Сохраняем пользователя в БД со всеми полями
-    data = await state.get_data()
-    user_rlname = data["user_rlname"]
-    user_surname = data["user_surname"]
-    user_number = data["user_number"]
-    experience_years = int(data["experience_years"])
-    city = data["city"]
-    # Преобразуем slug-и в читаемые названия
-    from tgbot.keyboards.inline_register import SPECS
-
+    # Преобразуем slug-и в читаемые названия (SPECS = [(slug, title), ...])
     slug_to_title = {s: t for s, t in SPECS}
-    selected_slugs = data.get("specs_selected", [])
+    selected_slugs = data.get("specs_selected", []) or []
     spec_titles = [slug_to_title.get(s, s) for s in selected_slugs]
     specializations_str = ",".join(spec_titles)
-    work_photos = data.get("work_photos", [])
+
+    work_photos = data.get("work_photos", []) or []
     work_photos_json = json.dumps(work_photos, ensure_ascii=False)
 
+    # Сохранение профиля
     Userx.update_with_profile(
-        user_id=call.from_user.id,
-        user_login=call.from_user.username or "unknown",
-        user_name=call.from_user.first_name or "unknown",
+        user_id=user_id,
+        user_login=getattr(recipient.from_user, "username", None) or "unknown",
+        user_name=getattr(recipient.from_user, "first_name", None) or "unknown",
         user_rlname=user_rlname,
         user_surname=user_surname,
         user_number=user_number,
@@ -316,7 +313,7 @@ async def photos_skip(call: CallbackQuery, state: FSMContext):
 
     await state.clear()
 
-    await call.message.edit_text(
+    summary = (
         f"✅ Регистрация завершена!\n"
         f"Имя: {user_rlname}\n"
         f"Фамилия: {user_surname}\n"
@@ -326,14 +323,100 @@ async def photos_skip(call: CallbackQuery, state: FSMContext):
         f"Специализации: {specializations_str or '—'}\n"
         f"Фото работ: {'добавлены' if work_photos else 'не добавлены'}"
     )
-    await call.message.answer(
-        f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
-    )
-    await call.message.answer(
-        "Что дальше?", reply_markup=menu_second_start(call.from_user.id)
-    )
-    await call.answer()
 
+    # Удобно поддержать оба варианта получателя (сообщение / колбэк)
+    if isinstance(recipient, CallbackQuery):
+        await recipient.message.edit_text(summary)
+        await recipient.message.answer(
+            f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
+        )
+        await recipient.message.answer(
+            "Что дальше?", reply_markup=menu_second_start(user_id)
+        )
+        await recipient.answer()
+    else:
+        await recipient.answer(summary)
+        await recipient.answer(
+            f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
+        )
+        await recipient.answer(
+            "Что дальше?", reply_markup=menu_second_start(user_id)
+        )
+
+
+# --- Приём фото (до 5), с инлайн-кнопками «Готово / Пропустить» ---
+@router.message(StateFilter("photos"), F.photo, flags={"rate": 0})
+@router.message(RegisterStates.photos, F.photo, flags={"rate": 0})  # если у тебя именно RegisterStates.photos
+async def reg_receive_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    files = list(data.get("work_photos", [])) if isinstance(data.get("work_photos"), list) else []
+
+    file_id = message.photo[-1].file_id  # самое большое превью
+    if file_id in files:
+        await message.answer(
+            f"⚠️ Это фото уже добавлено. Сейчас сохранено: {len(files)}/5.",
+            reply_markup=reg_photos_kb(),
+        )
+        return
+
+    if len(files) >= 5:
+        await message.answer(
+            "⚠️ Лимит 5 фото уже достигнут. Нажмите «Готово» или «Пропустить».",
+            reply_markup=reg_photos_kb(),
+        )
+        return
+
+    files.append(file_id)
+    await state.update_data(work_photos=files)
+
+    if len(files) < 5:
+        await message.answer(
+            f"✅ Фото сохранено ({len(files)}/5). "
+            f"Можете отправить ещё или нажмите «Готово».",
+            reply_markup=reg_photos_kb(),
+        )
+    else:
+        await message.answer(
+            "✅ Добавлено 5/5 фото. Нажмите «Готово» для завершения регистрации.",
+            reply_markup=reg_photos_kb(),
+        )
+
+
+# --- Любой другой ввод на шаге фото: подсказываем и даём кнопки ---
+@router.message(RegisterStates.photos)
+async def reg_non_photo_in_photos_step(message: Message, state: FSMContext):
+    txt = (message.text or "").strip().lower()
+    if txt in {"пропустить", "skip"}:
+        # Если фото уже есть — не теряем, просто завершаем
+        await _finalize_worker_registration(message.from_user.id, state, message)
+        return
+
+    await message.answer(
+        "🖼 Пришлите фото ваших работ (до 5 шт). "
+        "После загрузки нажмите «Готово» или «Пропустить».",
+        reply_markup=reg_photos_kb(),
+    )
+
+
+# --- «Готово» (с фото или без) ---
+@router.callback_query(RegisterStates.photos, F.data == "reg:photos_done", flags={"rate": 0})
+async def reg_photos_done(cq: CallbackQuery, state: FSMContext):
+    await cq.answer()
+    await _finalize_worker_registration(cq.from_user.id, state, cq)
+
+
+# --- «Пропустить» (если фото уже есть — тоже завершаем, ничего не теряем) ---
+@router.callback_query(RegisterStates.photos, F.data == "reg:photos_skip", flags={"rate": 0})
+async def reg_photos_skip(cq: CallbackQuery, state: FSMContext):
+    await cq.answer()
+    await _finalize_worker_registration(cq.from_user.id, state, cq)
+
+
+# --- Совместимость со старым колбэком "photos_skip" ---
+@router.callback_query(RegisterStates.photos, F.data == "photos_skip")
+async def _compat_photos_skip(cq: CallbackQuery, state: FSMContext):
+    await cq.answer()
+    await _finalize_worker_registration(cq.from_user.id, state, cq)
 
 # ─── Состояния ───
 class RegisterStatesClients(StatesGroup):
