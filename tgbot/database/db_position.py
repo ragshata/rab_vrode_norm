@@ -254,3 +254,18 @@ class Positionx:
             con.row_factory = dict_factory
             sql = f"DELETE FROM {Positionx.storage_name}"
             con.execute(sql)
+
+    @staticmethod
+    def set_status_by_unix(position_unix: int, new_status: int, **extra_fields) -> bool:
+        """
+        Обновить статус (и любые дополнительные поля) по position_unix.
+        Возвращает True если апдейт применён (запись существовала).
+        """
+        pos = Positionx.get(position_unix=position_unix)
+        if not pos:
+            return False
+        fields = {"position_status": int(new_status)}
+        if extra_fields:
+            fields.update(extra_fields)
+        Positionx.update_unix(position_unix, **fields)
+        return True

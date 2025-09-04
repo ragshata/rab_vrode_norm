@@ -338,8 +338,11 @@ async def sub_pay(call: CallbackQuery):
         "<b>☎️ Нажмите кнопку ниже для связи с Администратором для оплаты.</b>",
         reply_markup=user_support_finl(settings.misc_support),
     )
+
+
 import time
 from datetime import datetime
+
 
 def _to_int_unix(v) -> int:
     """
@@ -377,7 +380,7 @@ def get_client_sub_active_until(client) -> int:
     (берём максимум из trial и paid), не глядя на текст статуса.
     """
     trial_u = _to_int_unix(getattr(client, "sub_trial_until", 0))
-    paid_u  = _to_int_unix(getattr(client, "sub_paid_until", 0))
+    paid_u = _to_int_unix(getattr(client, "sub_paid_until", 0))
     return max(trial_u, paid_u)
 
 
@@ -389,6 +392,7 @@ from aiogram.types import Message
 from aiogram.fsm.context import FSMContext
 
 from tgbot.database.db_users import Clientx
+
 
 @router.message(F.text.in_(("➕ Создать заказ",)))
 async def start_order(message: Message, state: FSMContext):
@@ -407,7 +411,7 @@ async def start_order(message: Message, state: FSMContext):
         return
 
     # 3) проверяем только по дате действия
-    #if not is_client_sub_active(client):
+    # if not is_client_sub_active(client):
     #    await message.answer(
     #        "<b>🔒 Подписка нужна для создания заказов</b>\n\n"
     #        "Первый месяц — бесплатно.\n"
@@ -1344,6 +1348,7 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
         rec = _pos_to_dict(pos)
 
     ext = _pos_ext(rec.get("position_desc", ""))
+
     cats_map = {c.category_id: c.category_name for c in Categoryx.get_all()}
     cat_ids = ext.get("categories") or (
         [rec.get("category_id")] if rec.get("category_id") else []
@@ -1352,8 +1357,10 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
         ", ".join([cats_map.get(cid, str(cid)) for cid in cat_ids]) if cat_ids else "—"
     )
 
-    budget = rec.get("position_price", 0)
-    budget_text = f"{budget} руб." if budget else (ext.get("budget") or "договорная")
+    budget = int(rec.get("position_price", 0) or 0)
+    budget_text = (
+        f"{budget} руб." if budget > 0 else (ext.get("budget") or "договорная")
+    )
     city = ext.get("city", "—")
     address = ext.get("address", "—")
     dates = ext.get("dates", "—")
@@ -1375,18 +1382,32 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
     )
 
     wid = call.from_user.id
-    assigned = rec.get("worker_id", 0) or 0
-    pid = rec.get("position_id", 0) or 0
+    assigned_id = int(rec.get("worker_id", 0) or 0)
+    pid = int(rec.get("position_id", 0) or 0)  # заказчик
+    status = int(rec.get("position_status", 0) or 0)  # 0=новый, 1=в работе, 2=завершён
+    assigned = assigned_id == wid
 
-    buttons = []
-    if assigned == wid:
-        buttons.append(
-            [
-                InlineKeyboardButton(
-                    text="📞 Связаться с заказчиком", url=f"tg://user?id={pid}"
-                )
-            ]
-        )
+    buttons: list[list[InlineKeyboardButton]] = []
+
+    if assigned:
+        # связь с заказчиком
+
+        # «Сдать работу» — только если ещё не завершён
+        if status != 2:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="🚚 Сдать работу", callback_data=f"myresp:handoff:{punix}"
+                    )
+                ]
+            )
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        text="📞 Связаться с заказчиком", url=f"tg://user?id={pid}"
+                    )
+                ]
+            )
     else:
         buttons.append(
             [
@@ -1861,7 +1882,11 @@ def _budget_text(price: int, ext_budget) -> str:
 
 
 async def _ensure_orders_all_dataset(state: FSMContext):
+    import json
+
     data = await state.get_data()
+
+    # --- кэш ---
     keys = data.get("orders_all_list")
     mp_json = data.get("orders_all_map")
     if keys and mp_json:
@@ -1870,42 +1895,109 @@ async def _ensure_orders_all_dataset(state: FSMContext):
         except Exception:
             pass
 
-    # забираем только свободные и активные
-    # (если ваш ORM не поддерживает пустой gets(), можно сделать gets(worker_id=0))
+    # --- фильтры (если вы их где-то записываете в state) ---
+    city_filter = (data.get("orders_city") or "").strip()
+    cats_raw = data.get("orders_cats")
+    cats_filter = set()
+    if isinstance(cats_raw, (list, tuple, set)):
+        for c in cats_raw:
+            s = str(c).strip()
+            if s.isdigit():
+                cats_filter.add(int(s))
+
+    # --- вытаскиваем ТОЛЬКО свободные заказы ---
+    # свободные = worker_id = 0 и status = 0 (не «в работе» и не «выполнен»)
     all_free = Positionx.gets(worker_id=0) or []
-    records = []
+    records: list[dict] = []
+
     for p in all_free:
-        if int(getattr(p, "position_status", 0) or 0) == 2:
+        status = int(getattr(p, "position_status", 0) or 0)
+        if status != 0:  # берём только новые
             continue
-        k = _key_for(p)
+
+        # разбор расширения
+        desc = getattr(p, "position_desc", "") or ""
+        try:
+            ext = _pos_ext(desc)  # ваша функция, которая достаёт [ORDER] JSON
+        except Exception:
+            ext = {}
+
+        # город (если задан фильтр)
+        order_city = (ext.get("city") or "").strip()
+        if city_filter and order_city.lower() != city_filter.lower():
+            continue
+
+        # все категории заказа: JSON.categories -> set[int], иначе fallback на category_id
+        cats_json = ext.get("categories") or []
+        order_cats = set()
+        for c in cats_json:
+            s = str(c).strip()
+            if s.isdigit():
+                order_cats.add(int(s))
+        if not order_cats:
+            base_cat = int(getattr(p, "category_id", 0) or 0)
+            if base_cat:
+                order_cats = {base_cat}
+
+        # фильтр по категориям, если он задан
+        if cats_filter and order_cats.isdisjoint(cats_filter):
+            continue
+
+        rec = {
+            "position_id": int(getattr(p, "position_id", 0) or 0),
+            "position_name": getattr(p, "position_name", "") or "",
+            "position_price": int(getattr(p, "position_price", 0) or 0),
+            "position_desc": desc,
+            "category_id": int(getattr(p, "category_id", 0) or 0),
+            "position_unix": int(getattr(p, "position_unix", 0) or 0),
+            "worker_id": int(getattr(p, "worker_id", 0) or 0),
+            "position_status": status,
+            # полезно сохранить распарсенные поля для последующего UI
+            "_ext_city": order_city,
+            "_ext_categories": sorted(order_cats),
+        }
+
+        # ключ записи
+        k = _key_for(p)  # как у вас раньше
         if not k:
             continue
-        records.append(
-            {
-                "position_id": getattr(p, "position_id", 0),
-                "position_name": getattr(p, "position_name", ""),
-                "position_price": int(getattr(p, "position_price", 0) or 0),
-                "position_desc": getattr(p, "position_desc", ""),
-                "category_id": getattr(p, "category_id", 0),
-                "position_unix": getattr(p, "position_unix", 0),
-                "worker_id": getattr(p, "worker_id", 0),
-                "position_status": getattr(p, "position_status", 0),
-            }
-        )
+        rec["_key"] = int(k)
+        records.append(rec)
 
     # сортировка: новые выше
     records.sort(key=_sort_val, reverse=True)
-    mp = {
-        str(_key_for_obj := (rec["position_unix"] or rec["position_id"])): rec
-        for rec in records
-    }
-    keys = [int(k) for k in mp.keys()]
+
+    # собираем map и keys
+    mp = {str(rec["_key"]): rec for rec in records}
+    keys = [rec["_key"] for rec in records]
 
     await state.update_data(
         orders_all_list=keys,
         orders_all_map=json.dumps(mp, ensure_ascii=False),
     )
     return keys, mp
+
+
+def _pos_categories(rec_or_model) -> set[int]:
+    """
+    Вернёт множество категорий заказа из JSON ([ORDER].categories),
+    а если там пусто — вернёт {category_id}.
+    Поддерживает как dict (после _pos_to_dict), так и модель PositionModel.
+    """
+    # достаём поля безопасно
+    if isinstance(rec_or_model, dict):
+        desc = rec_or_model.get("position_desc", "") or ""
+        cat_id = int(rec_or_model.get("category_id", 0) or 0)
+    else:
+        desc = getattr(rec_or_model, "position_desc", "") or ""
+        cat_id = int(getattr(rec_or_model, "category_id", 0) or 0)
+
+    ext = _pos_ext(desc)
+    cats = ext.get("categories") or []
+    cats = {int(c) for c in cats if str(c).strip().isdigit()}
+    if not cats and cat_id:
+        cats = {cat_id}
+    return cats
 
 
 async def _show_orders_all_page(
@@ -3409,6 +3501,15 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
                 )
             ]
         )
+
+        # Добавляем кнопку "Сдать работу"
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="🚚 Сдать работу", callback_data=f"myresp:handoff:{punix}"
+                )
+            ]
+        )
     else:
         buttons.append(
             [
@@ -3439,6 +3540,160 @@ async def myresp_view(call: CallbackQuery, state: FSMContext):
 
 
 from aiogram import Bot
+
+
+from aiogram import F, types, Bot
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    Message,
+)
+
+
+# ── СТАТУСА: 0=новый, 1=в работе, 2=завершён (принят) ──
+# «Сдать работу» (жмёт Исполнитель в «Мои отклики»)
+@router.callback_query(F.data.startswith("myresp:handoff:"))
+async def handoff_work(call: CallbackQuery, state: FSMContext, bot: Bot):
+    punix = int(call.data.split(":")[2])
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
+
+    worker_id = int(getattr(pos, "worker_id", 0) or 0)
+    if worker_id != call.from_user.id:
+        await call.answer("Вы не являетесь исполнителем этого заказа.", show_alert=True)
+        return
+
+    client_id = int(getattr(pos, "position_id", 0) or 0)
+    if not client_id:
+        await call.answer("Заказчик не найден.", show_alert=True)
+        return
+
+    title = pos.position_name or "Заказ"
+    price = int(getattr(pos, "position_price", 0) or 0)
+    price_text = f"{price} руб." if price > 0 else "договорная"
+
+    txt = (
+        "🛠 <b>Исполнитель сдал работу</b>\n\n"
+        f"📦 Заказ: <code>{title}</code>\n"
+        f"💰 Бюджет: <code>{price_text}</code>\n\n"
+        "Проверьте результат и подтвердите."
+    )
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Принять работу", callback_data=f"order:accept:{punix}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Отклонить работу", callback_data=f"order:reject:{punix}"
+                )
+            ],
+        ]
+    )
+
+    try:
+        await bot.send_message(client_id, txt, reply_markup=kb)
+        await call.answer("Отправили заказчику на подтверждение ✅", show_alert=True)
+    except Exception as e:
+        await call.answer(f"Не удалось уведомить заказчика: {e}", show_alert=True)
+
+
+# Принять работу (жмёт Заказчик)
+@router.callback_query(F.data.startswith("order:accept:"))
+async def order_accept(call: CallbackQuery, state: FSMContext, bot: Bot):
+    punix = int(call.data.split(":")[2])
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
+
+    # безопасность: подтверждать может только владелец заказа
+    client_id = int(getattr(pos, "position_id", 0) or 0)
+    if client_id != call.from_user.id:
+        await call.answer("Это не ваш заказ.", show_alert=True)
+        return
+
+    # помечаем завершённым
+    ok = Positionx.set_status_by_unix(punix, 2)
+    if not ok:
+        await call.answer("Не удалось обновить заказ.", show_alert=True)
+        return
+
+    # уведомим исполнителя
+    wid = int(getattr(pos, "worker_id", 0) or 0)
+    if wid:
+        try:
+            await bot.send_message(
+                wid,
+                f"✅ Заказчик принял работу по заказу <b>{pos.position_name or 'Заказ'}</b>.",
+            )
+        except Exception:
+            pass
+
+    await call.message.edit_text("✅ Работа принята! Спасибо за сотрудничество.")
+    await call.answer()
+
+
+# Отклонить работу (жмёт Заказчик) → просим причину
+class RejectStates(StatesGroup):
+    reason = State()
+
+
+@router.callback_query(F.data.startswith("order:reject:"))
+async def order_reject_start(call: CallbackQuery, state: FSMContext):
+    punix = int(call.data.split(":")[2])
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await call.answer("Заказ не найден.", show_alert=True)
+        return
+
+    client_id = int(getattr(pos, "position_id", 0) or 0)
+    if client_id != call.from_user.id:
+        await call.answer("Это не ваш заказ.", show_alert=True)
+        return
+
+    await state.update_data(reject_punix=punix)
+    await call.message.answer("❌ Укажите причину отклонения работы одним сообщением:")
+    await state.set_state(RejectStates.reason)
+    await call.answer()
+
+
+@router.message(RejectStates.reason)
+async def order_reject_reason(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    punix = int(data.get("reject_punix") or 0)
+    reason = (message.text or "").strip()
+
+    pos = Positionx.get(position_unix=punix)
+    if not pos:
+        await message.answer("⚠️ Заказ не найден.")
+        await state.clear()
+        return
+
+    # статус оставляем «в работе» (1) — или можешь вернуть в 1 явно:
+    # Positionx.set_status_by_unix(punix, 1)
+
+    wid = int(getattr(pos, "worker_id", 0) or 0)
+    if wid:
+        try:
+            await bot.send_message(
+                wid,
+                "❌ <b>Работа отклонена заказчиком</b>\n\n"
+                f"📦 Заказ: <code>{pos.position_name or 'Заказ'}</code>\n"
+                f"Причина: {reason}",
+            )
+        except Exception:
+            pass
+
+    await message.answer("Отклонение зафиксировано. Исполнитель уведомлён.")
+    await state.clear()
 
 
 @router.callback_query(StateFilter("myresp_list"), F.data.startswith("myresp:handoff:"))
