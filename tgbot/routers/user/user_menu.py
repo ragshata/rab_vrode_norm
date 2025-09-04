@@ -2010,7 +2010,7 @@ async def _show_orders_all_page(
     slice_keys = keys[page * per_page : page * per_page + per_page]
 
     kb = _orders_all_kb(slice_keys, mp, page, per_page, total)
-    text = "<b>🧾 Актуальные заказы (все)</b>\nВыберите заказ:"
+    text = "<b>🧾 Заказы других городов</b>\nВыберите заказ:"
 
     try:
         if isinstance(msg_or_cb, CallbackQuery):
@@ -2026,6 +2026,69 @@ async def _show_orders_all_page(
             await msg_or_cb.answer(text, reply_markup=kb)
 
     await state.update_data(orders_all_page=page, orders_all_per_page=per_page)
+
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+
+def _truncate(s: str, limit: int = 64) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    return s if len(s) <= limit else (s[: limit - 1] + "…")
+
+
+def _order_brief_text(rec: dict) -> str:
+    # вытаскиваем расширенное описание
+    ext = _pos_ext(rec.get("position_desc", ""))  # твоя функция парсинга JSON из desc
+    city = ext.get("city") or "—"
+
+    # короткое название/описание
+    base = (ext.get("raw_desc") or rec.get("position_name") or "").strip()
+    base = _truncate(base, 40)  # оставим место под город и бюджет
+
+    # бюджет
+    price = int(rec.get("position_price", 0) or 0)
+    budget_text = f"{price} ₽" if price > 0 else (ext.get("budget") or "дог.")
+
+    # кнопка однострочная (кнопки не любят переносов)
+    label = f"🏙 {city} • {base} • 💰 {budget_text}"
+    return _truncate(label, 64)
+
+
+def _orders_all_kb(
+    slice_keys: list[int], mp: dict, page: int, per_page: int, total: int
+) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+
+    # одна кнопка — одна строка => «на всю ширину»
+    for k in slice_keys:
+        rec = mp.get(str(k)) or {}
+        label = _order_brief_text(rec)
+        kb.row(
+            InlineKeyboardButton(
+                text=label,
+                callback_data=f"orders_all:view:{k}",
+            )
+        )
+
+    # пагинация (две кнопки в одну строку, если нужны)
+    nav = []
+    if page > 0:
+        nav.append(
+            InlineKeyboardButton(
+                text="⬅️ Назад", callback_data=f"orders_all:page:{page-1}"
+            )
+        )
+    if (page + 1) * per_page < total:
+        nav.append(
+            InlineKeyboardButton(
+                text="Вперёд ➡️", callback_data=f"orders_all:page:{page+1}"
+            )
+        )
+    if nav:
+        kb.row(*nav)
+
+    return kb.as_markup()
 
 
 # =============== Роуты ===============
@@ -3875,24 +3938,26 @@ async def orders_cancel_resp(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ✅ Открытие «Мои заказы» — список кнопками + пагинация
-@router.message(F.text == "💡 Мои заказы")
-async def my_orders_root(message: Message, state: FSM):
+# общий хелпер открытия «Мои заказы»
+async def open_my_orders_list(
+    target_msg_or_call_msg, state: FSM, user_id: int, page: int = 0
+):
     await state.clear()
 
-    user_id = message.from_user.id
     my_positions = Positionx.gets(position_id=user_id) or []
-    # отсортируем по дате, новые выше (если есть поле position_unix)
     try:
         my_positions.sort(key=lambda p: p.position_unix, reverse=True)
     except Exception:
         pass
 
     if not my_positions:
-        await message.answer("<b>❌ У вас пока нет заказов.</b>")
+        # аккуратно обновим / отправим
+        try:
+            await target_msg_or_call_msg.edit_text("<b>❌ У вас пока нет заказов.</b>")
+        except Exception:
+            await target_msg_or_call_msg.answer("<b>❌ У вас пока нет заказов.</b>")
         return
 
-    # сложим в state лёгкую карту для отображения
     await state.update_data(
         my_orders_list=[p.position_unix for p in my_positions],
         my_orders_map=json.dumps(
@@ -3913,8 +3978,19 @@ async def my_orders_root(message: Message, state: FSM):
         ),
     )
 
-    await _show_my_orders_page(message, page=0, state=state)
+    await _show_my_orders_page(target_msg_or_call_msg, page=page, state=state)
     await state.set_state("my_orders_list")
+
+
+@router.message(F.text == "💡 Мои заказы")
+async def my_orders_root(message: Message, state: FSM):
+    await open_my_orders_list(message, state, user_id=message.from_user.id, page=0)
+
+
+@router.callback_query(F.data == "my_orders:back")
+async def my_orders_back(call: CallbackQuery, state: FSM):
+    await open_my_orders_list(call.message, state, user_id=call.from_user.id, page=0)
+    await call.answer()
 
 
 from aiogram.utils.keyboard import InlineKeyboardBuilder

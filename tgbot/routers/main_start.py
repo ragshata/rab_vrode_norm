@@ -262,24 +262,36 @@ async def specs_done(call: CallbackQuery, state: FSMContext):
 
 
 from aiogram import types, F, Router
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.filters import StateFilter
 
 import json
 
 
-
 # --- Клавиатура «Готово / Пропустить» для фото работ ---
 def reg_photos_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Готово", callback_data="reg:photos_done")],
-        [InlineKeyboardButton(text="⏭ Пропустить", callback_data="reg:photos_skip")],
-    ])
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Готово", callback_data="reg:photos_done")],
+            [
+                InlineKeyboardButton(
+                    text="⏭ Пропустить", callback_data="reg:photos_skip"
+                )
+            ],
+        ]
+    )
 
 
 # --- Общая финализация регистрации исполнителя ---
-async def _finalize_worker_registration(user_id: int, state: FSMContext, recipient: types.Message | types.CallbackQuery):
+async def _finalize_worker_registration(
+    user_id: int, state: FSMContext, recipient: types.Message | types.CallbackQuery
+):
     data = await state.get_data()
 
     user_rlname = data.get("user_rlname", "")
@@ -331,7 +343,7 @@ async def _finalize_worker_registration(user_id: int, state: FSMContext, recipie
             f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
         )
         await recipient.message.answer(
-            "Что дальше?", reply_markup=menu_second_start(user_id)
+            "Желаем вам хороших заказов!", reply_markup=menu_second_start(user_id)
         )
         await recipient.answer()
     else:
@@ -340,16 +352,22 @@ async def _finalize_worker_registration(user_id: int, state: FSMContext, recipie
             f"Добро пожаловать, {user_rlname}!\nВаш профиль исполнителя создан."
         )
         await recipient.answer(
-            "Что дальше?", reply_markup=menu_second_start(user_id)
+            "Желаем вам хороших заказов!", reply_markup=menu_second_start(user_id)
         )
 
 
 # --- Приём фото (до 5), с инлайн-кнопками «Готово / Пропустить» ---
 @router.message(StateFilter("photos"), F.photo, flags={"rate": 0})
-@router.message(RegisterStates.photos, F.photo, flags={"rate": 0})  # если у тебя именно RegisterStates.photos
+@router.message(
+    RegisterStates.photos, F.photo, flags={"rate": 0}
+)  # если у тебя именно RegisterStates.photos
 async def reg_receive_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    files = list(data.get("work_photos", [])) if isinstance(data.get("work_photos"), list) else []
+    files = (
+        list(data.get("work_photos", []))
+        if isinstance(data.get("work_photos"), list)
+        else []
+    )
 
     file_id = message.photo[-1].file_id  # самое большое превью
     if file_id in files:
@@ -399,14 +417,18 @@ async def reg_non_photo_in_photos_step(message: Message, state: FSMContext):
 
 
 # --- «Готово» (с фото или без) ---
-@router.callback_query(RegisterStates.photos, F.data == "reg:photos_done", flags={"rate": 0})
+@router.callback_query(
+    RegisterStates.photos, F.data == "reg:photos_done", flags={"rate": 0}
+)
 async def reg_photos_done(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
     await _finalize_worker_registration(cq.from_user.id, state, cq)
 
 
 # --- «Пропустить» (если фото уже есть — тоже завершаем, ничего не теряем) ---
-@router.callback_query(RegisterStates.photos, F.data == "reg:photos_skip", flags={"rate": 0})
+@router.callback_query(
+    RegisterStates.photos, F.data == "reg:photos_skip", flags={"rate": 0}
+)
 async def reg_photos_skip(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
     await _finalize_worker_registration(cq.from_user.id, state, cq)
@@ -417,6 +439,7 @@ async def reg_photos_skip(cq: CallbackQuery, state: FSMContext):
 async def _compat_photos_skip(cq: CallbackQuery, state: FSMContext):
     await cq.answer()
     await _finalize_worker_registration(cq.from_user.id, state, cq)
+
 
 # ─── Состояния ───
 class RegisterStatesClients(StatesGroup):

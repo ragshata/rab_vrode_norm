@@ -196,7 +196,7 @@ def position_edit_open_finl_all(
             data=f"position_edit_delete:{position_id}:{remover}:{position_unix}",
         ),
     ).row(
-        ikb("🔙 Вернуться", data=f"position_edit_swipe:{remover}"),
+        ikb("🔙 Вернуться", data=f"my_orders:back"),
     )
     return kb.as_markup()
 
@@ -238,7 +238,6 @@ def position_edit_open_finl(
     ).row(
         ikb(
             "▪️ Изм. Категорию",
-            # передадим punix, чтобы потом обновить позицию
             data=f"position_edit_category:{position_id}:{category_id}:{remover}:{position_unix}",
         ),
     ).row(
@@ -250,9 +249,9 @@ def position_edit_open_finl(
         ikb(
             "▪️ Удалить Заказ",
             data=f"position_edit_delete:{position_id}:{category_id}:{remover}:{position_unix}",
-        )
+        ),
     ).row(
-        ikb("🔙 Вернуться", data=f"position_edit_swipe:{category_id}:{remover}"),
+        ikb("🔙 Вернуться", data=f"my_orders:back"),
     )
 
     return keyboard.as_markup()
